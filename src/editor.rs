@@ -1,36 +1,73 @@
 use std::{
     cmp::min,
+    env,
     error::Error,
-    io::{stdout, Write},
+    fs::File,
+    io::{stdout, BufRead, BufReader, Write},
+    time::Duration,
 };
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{read, Event, KeyCode, KeyModifiers},
+    event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers},
     style::Print,
     terminal::{
-        self, disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
-        LeaveAlternateScreen,
+        self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
     },
     ExecutableCommand, QueueableCommand,
 };
 
-struct Vieew;
+struct Buffer {
+    lines: Vec<String>,
+}
 
-impl Vieew {
-    fn paint_rows(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut stdout = stdout();
-        stdout.queue(Hide)?;
-        let (rows, _cols) = size()?;
-        for i in 0..rows {
-            stdout.queue(MoveTo(0, i))?.queue(Print("~"))?;
+struct View {
+    buffer: Buffer,
+    file_argument: Option<String>,
+}
+impl Buffer {
+    pub fn new() -> Self {
+        Buffer {
+            lines: Vec::<String>::new(),
         }
-        stdout
-            .queue(MoveTo(0, 0))?
-            .queue(Print("Welcome to Turf Editor, Happy Editing!!!"))?
-            .queue(MoveTo(1, 1))?
-            .queue(Show)?;
-        stdout.flush()?;
+    }
+}
+
+impl View {
+    pub fn new(file_argument: Option<String>) -> Self {
+        View {
+            buffer: Buffer::new(),
+            file_argument,
+        }
+    }
+    pub fn display_file(&mut self, file_name: String) -> Result<u16, Box<dyn Error>> {
+        let current_dir = env::current_dir()?;
+        let file_path = current_dir.join(file_name);
+        let file = File::open(file_path)?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let content = line?;
+            self.buffer.lines.push(content.clone());
+            stdout().queue(Print(format!("{content}\r\n")))?;
+        }
+        let no_of_lines_printed = self.buffer.lines.len() as u16;
+        Ok(no_of_lines_printed)
+    }
+    pub fn render(&mut self) -> Result<(), Box<dyn Error>> {
+        let (_csize, r_size) = terminal::size()?;
+        let mut lines_printed = 0;
+        match self.file_argument {
+            Some(ref file_arg) => {
+                lines_printed = self.display_file(file_arg.clone())?;
+            }
+            _ => {}
+        }
+        while lines_printed < r_size - 1 {
+            stdout().queue(Print("~\r\n"))?;
+            lines_printed += 1;
+        }
+        stdout().queue(Show)?;
+        stdout().flush()?;
         Ok(())
     }
 }
@@ -38,71 +75,85 @@ impl Vieew {
 pub struct Editor {
     cursor_position: (u16, u16),
     terminal_size: (u16, u16),
+    view: View,
+    should_quit: bool,
 }
 
 impl Editor {
-    pub fn new() -> Self {
+    pub fn new(file_name: Option<String>) -> Self {
         Editor {
             cursor_position: (0, 0),
             terminal_size: terminal::size().unwrap(),
+            view: View::new(file_name),
+            should_quit: false,
         }
     }
     pub fn move_cursor(&mut self, col: u16, row: u16) -> Result<(), Box<dyn Error>> {
-        stdout().queue(MoveTo(col, row))?;
+        stdout().execute(MoveTo(col, row))?;
         self.cursor_position = (col, row);
         Ok(())
     }
-    pub fn set_cursor(&mut self, col: u16, row: u16) {
-        self.cursor_position = (col, row);
-    }
-    pub fn move_cursor_left(&mut self) -> Result<(), Box<dyn Error>> {
-        let (col, row) = self.cursor_position;
-        stdout().queue(MoveTo(if col > 1 { col - 1 } else { col }, row))?;
-        stdout().queue(Print(""))?;
-        self.cursor_position = (if col > 1 { col - 1 } else { col }, row);
-        Ok(())
+    fn handle_event(&mut self, event: KeyEvent) -> Result<(), Box<dyn Error>> {
+        let KeyEvent {
+            code, modifiers, ..
+        } = event;
+        match code {
+            KeyCode::Char(c) => {
+                if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                    self.should_quit = true;
+                    Ok(())
+                } else {
+                    stdout().execute(Print(c))?;
+                    Ok(())
+                }
+            }
+            KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageDown
+            | KeyCode::PageUp => {
+                self.handle_key_event(code)?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
     fn handle_key_event(&mut self, code: KeyCode) -> Result<(), Box<dyn Error>> {
         let (col, row) = self.cursor_position;
         match code {
             KeyCode::Down => {
                 self.move_cursor(col, min(self.terminal_size.1, row + 1))?;
-                stdout().flush()?;
                 Ok(())
             }
             KeyCode::Left => {
                 self.move_cursor(if col > 1 { col - 1 } else { col }, row)?;
-                stdout().flush()?;
                 Ok(())
             }
             KeyCode::Right => {
                 self.move_cursor(min(col + 1, self.terminal_size.0), row)?;
-                stdout().flush()?;
                 Ok(())
             }
             KeyCode::Up => {
                 self.move_cursor(col, if row > 1 { row - 1 } else { row })?;
-                stdout().flush()?;
                 Ok(())
             }
             KeyCode::PageUp => {
                 self.move_cursor(col, 1)?;
-                stdout().flush()?;
                 Ok(())
             }
             KeyCode::PageDown => {
                 self.move_cursor(col, row)?;
-                stdout().flush()?;
                 Ok(())
             }
             KeyCode::Home => {
                 self.move_cursor(1, row)?;
-                stdout().flush()?;
                 Ok(())
             }
             KeyCode::End => {
                 self.move_cursor(col, row)?;
-                stdout().flush()?;
                 Ok(())
             }
             _ => Ok(()),
@@ -110,28 +161,31 @@ impl Editor {
     }
     pub fn run(&mut self) -> Result<(), Box<dyn Error>> {
         stdout().execute(EnterAlternateScreen)?;
-        Vieew.paint_rows()?;
-        enable_raw_mode().unwrap();
-        self.move_cursor(1, 1)?;
-        let mut handle = stdout().lock();
+        enable_raw_mode()?;
+        self.move_cursor(0, 0)?;
+        self.render()?;
+        disable_raw_mode()?;
+        stdout().execute(LeaveAlternateScreen)?;
+        Ok(())
+    }
+
+    pub fn render(&mut self) -> Result<(), Box<dyn Error>> {
+        stdout().queue(Hide)?;
+        self.view.render()?;
+        self.move_cursor(0, 0)?;
+        stdout().queue(Show)?;
+        stdout().flush()?;
         loop {
-            if let Ok(Event::Key(e)) = read() {
-                if let KeyCode::Char(c) = e.code {
-                    if c == 'c' && e.modifiers.contains(KeyModifiers::CONTROL) {
-                        break;
-                    } else {
-                        stdout().execute(Print(c))?;
-                        self.cursor_position = (self.cursor_position.0 + 1, self.cursor_position.1);
-                        handle.flush().unwrap();
+            if self.should_quit {
+                break;
+            } else {
+                if let Ok(true) = poll(Duration::from_millis(50)) {
+                    if let Ok(Event::Key(event)) = read() {
+                        self.handle_event(event)?;
                     }
-                } else {
-                    self.handle_key_event(e.code)?;
                 }
             }
         }
-        disable_raw_mode().unwrap();
-        stdout().execute(Clear(ClearType::FromCursorDown))?;
-        stdout().execute(LeaveAlternateScreen)?;
         Ok(())
     }
 }
